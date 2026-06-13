@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, test } from 'node:test';
 
 import { AhpClient } from '@microsoft/agent-host-protocol/client';
@@ -6,6 +9,7 @@ import type { Message, StateAction, ToolDefinition } from '@microsoft/agent-host
 
 import {
   AhpServer,
+  FileSystemSessionStore,
   createInMemoryTransportPair,
 } from '@wyrd-company/ahp-server';
 import {
@@ -172,6 +176,76 @@ test('Pi coding agent provider registers initial active-client tools as Pi custo
   await client.shutdown();
 });
 
+test('Pi coding agent provider resumes a persisted AHP session by recreating its Pi coding session', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-resume-'));
+  const firstPi = new FakePiCodingAgentSession();
+  const secondPi = new FakePiCodingAgentSession();
+  const sessionUri = 'ahp-session:/pi-coding-resume';
+  let resumedOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  try {
+    const firstServer = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          createAgentSession: async () => ({ session: firstPi }),
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory }),
+    });
+    const firstClient = createClient(firstServer);
+    firstClient.connect();
+    await firstClient.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+    await firstClient.request('createSession', {
+      channel: sessionUri,
+      provider: 'pi-coding-agent',
+      workingDirectory: 'file:///workspaces/project-a',
+    });
+    await firstClient.shutdown();
+
+    const secondServer = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          createAgentSession: async options => {
+            resumedOptions = options;
+            return { session: secondPi };
+          },
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory }),
+    });
+    const secondClient = createClient(secondServer);
+    secondClient.connect();
+
+    const reconnect = await secondClient.reconnect({
+      clientId: 'pi-coding-client',
+      lastSeenServerSeq: 0,
+      subscriptions: [sessionUri],
+    });
+    assert.equal(reconnect.type, 'snapshot');
+    assert.equal(resumedOptions?.cwd, '/workspaces/project-a');
+
+    const subscription = secondClient.attachSubscription(sessionUri);
+    secondClient.dispatch(sessionUri, {
+      type: 'session/turnStarted',
+      turnId: 'resume-turn',
+      message: userMessage('Continue after reconnect'),
+    } as StateAction);
+
+    await waitFor(() => secondPi.prompts.length === 1);
+    secondPi.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Resumed Pi coding', contentIndex: 0, partial: assistantMessage() }, message: assistantMessage() });
+    secondPi.emit({ type: 'agent_end', messages: [assistantMessage()], willRetry: false });
+    secondPi.releasePrompt();
+
+    const actions = await collectUntilTerminal(subscription);
+    assert.deepEqual(secondPi.prompts, ['Continue after reconnect']);
+    assert.equal(actions.at(-1)?.type, 'session/turnComplete');
+
+    await secondClient.shutdown();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 class FakePiCodingAgentSession implements PiCodingAgentSessionLike {
   readonly prompts: string[] = [];
   activeToolNames: string[] = [];
@@ -212,6 +286,12 @@ class FakePiCodingAgentSession implements PiCodingAgentSessionLike {
   setActiveToolsByName(toolNames: string[]): void {
     this.activeToolNames = toolNames;
   }
+}
+
+function createClient(server: AhpServer): AhpClient {
+  const [clientTransport, serverTransport] = createInMemoryTransportPair();
+  runningServers.push(server.accept(serverTransport));
+  return new AhpClient(clientTransport, { requestTimeoutMs: 1_000 });
 }
 
 async function collectUntilTerminal(subscription: AsyncIterator<unknown>): Promise<StateAction[]> {

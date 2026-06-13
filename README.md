@@ -27,6 +27,16 @@ The provider maps AHP active-client tools present at session creation into Pi SD
 
 Pi coding-agent custom tools are registered when the Pi session is created. The adapter can enable, disable, and route the registered AHP tool set as active-client ownership changes, but newly introduced tool names after Pi session creation require a new AHP session until Pi exposes a public runtime API for adding SDK custom tool definitions.
 
+## Session Resume
+
+The provider implements `ResumableAgentProvider`. When `ahp-server` reloads a
+persisted AHP session, the adapter recreates the Pi coding-agent SDK session from
+the stored AHP working directory, model/config context, and active-client tools.
+
+Native Pi coding-agent transcript continuity depends on the Pi session options
+you pass, such as a durable `agentDir` or session manager/path. The adapter
+restores the AHP provider runtime; Pi owns its own deeper session persistence.
+
 ## Usage
 
 ```ts

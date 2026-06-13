@@ -23,6 +23,8 @@ import type {
   AgentSession,
   AgentSessionContext,
   AgentTurnSink,
+  ResumableAgentProvider,
+  ResumableAgentSessionContext,
 } from '@wyrd-company/ahp-provider-kit';
 import {
   ActiveClientToolRouter,
@@ -61,7 +63,7 @@ export interface PiCodingAgentProviderOptions extends Omit<CreateAgentSessionOpt
   ) => Partial<PiCodingAgentSessionFactoryOptions> | Promise<Partial<PiCodingAgentSessionFactoryOptions>>;
 }
 
-export function createPiCodingAgentProvider(options: PiCodingAgentProviderOptions = {}): AgentProvider {
+export function createPiCodingAgentProvider(options: PiCodingAgentProviderOptions = {}): ResumableAgentProvider {
   const providerId = options.providerId ?? 'pi-coding-agent';
   const defaultModel = options.defaultModel ?? 'pi-coding-agent';
   const agent: AgentInfo = singleModelAgentInfo({
@@ -71,36 +73,43 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
     defaultModel,
   });
 
+  async function createRuntimeSession(context: AgentSessionContext): Promise<AgentSession> {
+    const cwd = context.workingDirectory ? uriToPath(context.workingDirectory) : process.cwd();
+    const activeClientTools = new ActiveClientToolRouter({
+      activeClientTools: context.activeClientTools,
+      sink: context.activeClientToolSink,
+    });
+    const turnState: PiCodingAgentTurnState = {};
+    const ahpToolNamesAtCreation = new Set(context.activeClientTools?.tools.map(tool => tool.name) ?? []);
+    const sessionOptions = await options.createSessionOptions?.(context) ?? {};
+    const createAgentSession = options.createAgentSession ?? defaultPiAgentSessionFactory;
+    const created = await createAgentSession({
+      ...stripProviderOptions(options),
+      ...sessionOptions,
+      cwd,
+      customTools: [
+        ...(options.customTools ?? []),
+        ...(sessionOptions.customTools ?? []),
+        ...toPiActiveClientTools(context.activeClientTools?.tools ?? [], activeClientTools, turnState),
+      ],
+    });
+    const session = new PiCodingAHPAgentSession(
+      created.session,
+      activeClientTools,
+      ahpToolNamesAtCreation,
+      turnState,
+    );
+    session.setActiveClientTools(context.activeClientTools);
+    return session;
+  }
+
   return {
     agent,
-    async createSession(context: AgentSessionContext): Promise<AgentSession> {
-      const cwd = context.workingDirectory ? uriToPath(context.workingDirectory) : process.cwd();
-      const activeClientTools = new ActiveClientToolRouter({
-        activeClientTools: context.activeClientTools,
-        sink: context.activeClientToolSink,
-      });
-      const turnState: PiCodingAgentTurnState = {};
-      const ahpToolNamesAtCreation = new Set(context.activeClientTools?.tools.map(tool => tool.name) ?? []);
-      const sessionOptions = await options.createSessionOptions?.(context) ?? {};
-      const createAgentSession = options.createAgentSession ?? defaultPiAgentSessionFactory;
-      const created = await createAgentSession({
-        ...stripProviderOptions(options),
-        ...sessionOptions,
-        cwd,
-        customTools: [
-          ...(options.customTools ?? []),
-          ...(sessionOptions.customTools ?? []),
-          ...toPiActiveClientTools(context.activeClientTools?.tools ?? [], activeClientTools, turnState),
-        ],
-      });
-      const session = new PiCodingAHPAgentSession(
-        created.session,
-        activeClientTools,
-        ahpToolNamesAtCreation,
-        turnState,
-      );
-      session.setActiveClientTools(context.activeClientTools);
-      return session;
+    createSession(context: AgentSessionContext): Promise<AgentSession> {
+      return createRuntimeSession(context);
+    },
+    resumeSession(context: ResumableAgentSessionContext): Promise<AgentSession> {
+      return createRuntimeSession(context);
     },
   };
 }
