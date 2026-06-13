@@ -1,0 +1,55 @@
+{
+  "name": "@wyrd-company/ahp-pi-coding-agent",
+  "version": "0.1.0",
+  "description": "Agent Host Protocol provider adapter for the real Pi coding agent SDK.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Wyrd Company",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wyrd-company/ahp-pi-coding-agent.git"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run verify",
+    "test": "node --test --import tsx test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.78.0",
+    "@microsoft/agent-host-protocol": "^0.3.0",
+    "@wyrd-company/ahp-provider-kit": "^0.1.0",
+    "typebox": "^1.1.38"
+  },
+  "peerDependencies": {
+    "@wyrd-company/ahp-server": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@wyrd-company/ahp-server": "^0.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
