@@ -32,10 +32,14 @@ Pi coding-agent custom tools are registered when the Pi session is created. The 
 The provider implements `ResumableAgentProvider`. When `ahp-server` reloads a
 persisted AHP session, the adapter recreates the Pi coding-agent SDK session from
 the stored AHP working directory, model/config context, and active-client tools.
+For new sessions the adapter supplies `SessionManager.create(cwd)` when no
+explicit `sessionManager` is provided. Once Pi exposes `sessionFile` and
+`sessionId`, the adapter stores them through `AgentSession.getResumeState()` and
+uses `SessionManager.open(sessionFile)` after an AHP server restart.
 
-Native Pi coding-agent transcript continuity depends on the Pi session options
-you pass, such as a durable `agentDir` or session manager/path. The adapter
-restores the AHP provider runtime; Pi owns its own deeper session persistence.
+Consumers can still provide a fully configured Pi `sessionManager`; stored
+provider resume state takes precedence during resume so an interrupted AHP
+session continues the same Pi transcript.
 
 ## Usage
 

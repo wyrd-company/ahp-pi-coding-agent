@@ -10,6 +10,7 @@ import type {
 import {
   createAgentSession as createDefaultPiAgentSession,
   defineTool,
+  SessionManager,
   type AgentSessionEvent,
   type CreateAgentSessionOptions,
   type CreateAgentSessionResult,
@@ -23,6 +24,7 @@ import type {
   AgentSession,
   AgentSessionContext,
   AgentTurnSink,
+  ProviderResumeState,
   ResumableAgentProvider,
   ResumableAgentSessionContext,
 } from '@wyrd-company/ahp-provider-kit';
@@ -35,9 +37,12 @@ import {
 } from '@wyrd-company/ahp-provider-kit';
 
 export interface PiCodingAgentSessionLike {
+  readonly sessionFile?: string;
+  readonly sessionId?: string;
   prompt(text: string, options?: { expandPromptTemplates?: boolean; streamingBehavior?: 'steer' | 'followUp'; source?: string }): Promise<void>;
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   abort(): Promise<void> | void;
+  dispose?(): void;
   getActiveToolNames?(): string[];
   setActiveToolsByName?(toolNames: string[]): void;
 }
@@ -59,7 +64,7 @@ export interface PiCodingAgentProviderOptions extends Omit<CreateAgentSessionOpt
   readonly createAgentSession?: PiCodingAgentSessionFactory;
   readonly customTools?: readonly PiToolDefinition[];
   readonly createSessionOptions?: (
-    context: AgentSessionContext,
+    context: AgentSessionContext | ResumableAgentSessionContext,
   ) => Partial<PiCodingAgentSessionFactoryOptions> | Promise<Partial<PiCodingAgentSessionFactoryOptions>>;
 }
 
@@ -73,8 +78,9 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
     defaultModel,
   });
 
-  async function createRuntimeSession(context: AgentSessionContext): Promise<AgentSession> {
+  async function createRuntimeSession(context: AgentSessionContext | ResumableAgentSessionContext): Promise<AgentSession> {
     const cwd = context.workingDirectory ? uriToPath(context.workingDirectory) : process.cwd();
+    const resumeState = resumeStateFromContext(context);
     const activeClientTools = new ActiveClientToolRouter({
       activeClientTools: context.activeClientTools,
       sink: context.activeClientToolSink,
@@ -87,6 +93,11 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
       ...stripProviderOptions(options),
       ...sessionOptions,
       cwd,
+      sessionManager: resolveSessionManager({
+        cwd,
+        resumeState,
+        explicitSessionManager: sessionOptions.sessionManager ?? options.sessionManager,
+      }),
       customTools: [
         ...(options.customTools ?? []),
         ...(sessionOptions.customTools ?? []),
@@ -112,6 +123,11 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
       return createRuntimeSession(context);
     },
   };
+}
+
+interface PiCodingAgentResumeState extends ProviderResumeState {
+  readonly sessionFile?: string;
+  readonly sessionId?: string;
 }
 
 class PiCodingAHPAgentSession implements AgentSession {
@@ -192,8 +208,19 @@ class PiCodingAHPAgentSession implements AgentSession {
     await this.piSession.abort();
   }
 
+  getResumeState(): PiCodingAgentResumeState | undefined {
+    if (!this.piSession.sessionFile && !this.piSession.sessionId) {
+      return undefined;
+    }
+    return {
+      ...(this.piSession.sessionFile ? { sessionFile: this.piSession.sessionFile } : {}),
+      ...(this.piSession.sessionId ? { sessionId: this.piSession.sessionId } : {}),
+    };
+  }
+
   async dispose(): Promise<void> {
     await this.piSession.abort();
+    this.piSession.dispose?.();
   }
 
   private syncActiveTools(): void {
@@ -276,6 +303,30 @@ class PiCodingAHPAgentSession implements AgentSession {
       activeTurn.completed = true;
     }
   }
+}
+
+function resolveSessionManager(options: {
+  readonly cwd: string;
+  readonly resumeState: PiCodingAgentResumeState;
+  readonly explicitSessionManager?: CreateAgentSessionOptions['sessionManager'];
+}): CreateAgentSessionOptions['sessionManager'] {
+  if (options.resumeState.sessionFile) {
+    return SessionManager.open(options.resumeState.sessionFile, undefined, options.cwd);
+  }
+  if (options.resumeState.sessionId) {
+    return SessionManager.create(options.cwd, undefined, { id: options.resumeState.sessionId });
+  }
+  return options.explicitSessionManager ?? SessionManager.create(options.cwd);
+}
+
+function resumeStateFromContext(context: AgentSessionContext | ResumableAgentSessionContext): PiCodingAgentResumeState {
+  if (!('resumeState' in context) || !context.resumeState) {
+    return {};
+  }
+  return {
+    ...(typeof context.resumeState.sessionFile === 'string' ? { sessionFile: context.resumeState.sessionFile } : {}),
+    ...(typeof context.resumeState.sessionId === 'string' ? { sessionId: context.resumeState.sessionId } : {}),
+  };
 }
 
 function toPiActiveClientTools(

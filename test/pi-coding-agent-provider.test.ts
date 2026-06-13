@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -178,16 +178,26 @@ test('Pi coding agent provider registers initial active-client tools as Pi custo
 
 test('Pi coding agent provider resumes a persisted AHP session by recreating its Pi coding session', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-resume-'));
-  const firstPi = new FakePiCodingAgentSession();
   const secondPi = new FakePiCodingAgentSession();
   const sessionUri = 'ahp-session:/pi-coding-resume';
   let resumedOptions: PiCodingAgentSessionFactoryOptions | undefined;
+  let firstSessionFile: string | undefined;
+  let firstSessionId: string | undefined;
 
   try {
     const firstServer = new AhpServer({
       providers: [
         createPiCodingAgentProvider({
-          createAgentSession: async () => ({ session: firstPi }),
+          createAgentSession: async options => {
+            firstSessionFile = options.sessionManager?.getSessionFile();
+            firstSessionId = options.sessionManager?.getSessionId();
+            return {
+              session: new FakePiCodingAgentSession({
+                sessionFile: firstSessionFile,
+                sessionId: firstSessionId,
+              }),
+            };
+          },
         }),
       ],
       store: new FileSystemSessionStore({ directory }),
@@ -202,6 +212,21 @@ test('Pi coding agent provider resumes a persisted AHP session by recreating its
     });
     await firstClient.shutdown();
 
+    const store = new FileSystemSessionStore({ directory });
+    assert.ok(firstSessionFile);
+    assert.ok(firstSessionId);
+    assert.deepEqual(store.getSession(sessionUri)?.providerResumeState, {
+      sessionFile: firstSessionFile,
+      sessionId: firstSessionId,
+    });
+    writeFileSync(firstSessionFile, `${JSON.stringify({
+      type: 'session',
+      version: 3,
+      id: firstSessionId,
+      timestamp: new Date().toISOString(),
+      cwd: '/workspaces/project-a',
+    })}\n`);
+
     const secondServer = new AhpServer({
       providers: [
         createPiCodingAgentProvider({
@@ -211,7 +236,7 @@ test('Pi coding agent provider resumes a persisted AHP session by recreating its
           },
         }),
       ],
-      store: new FileSystemSessionStore({ directory }),
+      store,
     });
     const secondClient = createClient(secondServer);
     secondClient.connect();
@@ -223,6 +248,8 @@ test('Pi coding agent provider resumes a persisted AHP session by recreating its
     });
     assert.equal(reconnect.type, 'snapshot');
     assert.equal(resumedOptions?.cwd, '/workspaces/project-a');
+    assert.equal(resumedOptions?.sessionManager?.getSessionFile(), firstSessionFile);
+    assert.equal(resumedOptions?.sessionManager?.getSessionId(), firstSessionId);
 
     const subscription = secondClient.attachSubscription(sessionUri);
     secondClient.dispatch(sessionUri, {
@@ -248,9 +275,16 @@ test('Pi coding agent provider resumes a persisted AHP session by recreating its
 
 class FakePiCodingAgentSession implements PiCodingAgentSessionLike {
   readonly prompts: string[] = [];
+  readonly sessionFile?: string;
+  readonly sessionId?: string;
   activeToolNames: string[] = [];
   private readonly listeners = new Set<(event: Parameters<PiCodingAgentSessionLike['subscribe']>[0] extends (event: infer T) => void ? T : never) => void>();
   private release: (() => void) | undefined;
+
+  constructor(options: { sessionFile?: string; sessionId?: string } = {}) {
+    this.sessionFile = options.sessionFile;
+    this.sessionId = options.sessionId;
+  }
 
   async prompt(text: string): Promise<void> {
     this.prompts.push(text);
