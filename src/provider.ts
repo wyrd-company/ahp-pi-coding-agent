@@ -27,10 +27,12 @@ import type {
   ProviderResumeState,
   ResumableAgentProvider,
   ResumableAgentSessionContext,
+  SessionStorage,
 } from '@wyrd-company/ahp-provider-kit';
 import {
   ActiveClientToolRouter,
   MarkdownTurnEmitter,
+  resolveSessionStorageDir,
   singleModelAgentInfo,
   stringOrMarkdown,
   uriToPath,
@@ -63,6 +65,7 @@ export interface PiCodingAgentProviderOptions extends Omit<CreateAgentSessionOpt
   readonly defaultModel?: string;
   readonly createAgentSession?: PiCodingAgentSessionFactory;
   readonly customTools?: readonly PiToolDefinition[];
+  readonly sessionStorage?: SessionStorage;
   readonly createSessionOptions?: (
     context: AgentSessionContext | ResumableAgentSessionContext,
   ) => Partial<PiCodingAgentSessionFactoryOptions> | Promise<Partial<PiCodingAgentSessionFactoryOptions>>;
@@ -88,6 +91,8 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
     const turnState: PiCodingAgentTurnState = {};
     const ahpToolNamesAtCreation = new Set(context.activeClientTools?.tools.map(tool => tool.name) ?? []);
     const sessionOptions = await options.createSessionOptions?.(context) ?? {};
+    const explicitSessionManager = sessionOptions.sessionManager ?? options.sessionManager;
+    const sessionStorageDir = resolveSessionStorageDir(options.sessionStorage, context);
     const createAgentSession = options.createAgentSession ?? defaultPiAgentSessionFactory;
     const created = await createAgentSession({
       ...stripProviderOptions(options),
@@ -96,7 +101,8 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
       sessionManager: resolveSessionManager({
         cwd,
         resumeState,
-        explicitSessionManager: sessionOptions.sessionManager ?? options.sessionManager,
+        explicitSessionManager,
+        sessionStorageDir: sessionStorageDir ? uriToPath(sessionStorageDir) : undefined,
       }),
       customTools: [
         ...(options.customTools ?? []),
@@ -309,14 +315,15 @@ function resolveSessionManager(options: {
   readonly cwd: string;
   readonly resumeState: PiCodingAgentResumeState;
   readonly explicitSessionManager?: CreateAgentSessionOptions['sessionManager'];
+  readonly sessionStorageDir?: string;
 }): CreateAgentSessionOptions['sessionManager'] {
   if (options.resumeState.sessionFile) {
-    return SessionManager.open(options.resumeState.sessionFile, undefined, options.cwd);
+    return SessionManager.open(options.resumeState.sessionFile, options.sessionStorageDir, options.cwd);
   }
   if (options.resumeState.sessionId) {
-    return SessionManager.create(options.cwd, undefined, { id: options.resumeState.sessionId });
+    return SessionManager.create(options.cwd, options.sessionStorageDir, { id: options.resumeState.sessionId });
   }
-  return options.explicitSessionManager ?? SessionManager.create(options.cwd);
+  return options.explicitSessionManager ?? SessionManager.create(options.cwd, options.sessionStorageDir);
 }
 
 function resumeStateFromContext(context: AgentSessionContext | ResumableAgentSessionContext): PiCodingAgentResumeState {
@@ -437,6 +444,7 @@ function stripProviderOptions(options: PiCodingAgentProviderOptions): Omit<Creat
     createAgentSession: _createAgentSession,
     createSessionOptions: _createSessionOptions,
     customTools: _customTools,
+    sessionStorage: _sessionStorage,
     ...sessionOptions
   } = options;
   return sessionOptions;

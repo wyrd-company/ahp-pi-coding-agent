@@ -41,6 +41,21 @@ Consumers can still provide a fully configured Pi `sessionManager`; stored
 provider resume state takes precedence during resume so an interrupted AHP
 session continues the same Pi transcript.
 
+The provider also accepts `sessionStorage` from
+`@wyrd-company/ahp-provider-kit`. When `sessionStorage` resolves a directory for
+an AHP session, and no explicit Pi `sessionManager` was provided either on the
+provider or from `createSessionOptions(...)`, the adapter creates or opens the Pi
+`SessionManager` with that directory. This keeps the Pi JSONL session history
+under the resolved storage directory so the directory plus the provider resume
+state is enough to resume the transcript on another machine or path.
+
+Storage precedence is:
+
+1. Explicit `sessionManager` from `createSessionOptions(...)`.
+2. Explicit provider-level `sessionManager`.
+3. Resolved `sessionStorage` directory.
+4. The existing Pi SDK default session directory behavior.
+
 ## Usage
 
 ```ts

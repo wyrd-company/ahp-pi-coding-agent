@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 
 import { AhpClient } from '@microsoft/agent-host-protocol/client';
 import type { Message, StateAction, ToolDefinition } from '@microsoft/agent-host-protocol';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
 
 import {
   AhpServer,
@@ -271,6 +273,319 @@ test('Pi coding agent provider resumes a persisted AHP session by recreating its
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('Pi coding agent provider roots new sessions under static sessionStorage', async () => {
+  const storageRoot = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-static-'));
+  const sessionUri = 'ahp-session:/pi-coding-storage-static';
+  let createdOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  try {
+    const server = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: pathToFileURL(storageRoot).href,
+          createAgentSession: async options => {
+            createdOptions = options;
+            return {
+              session: new FakePiCodingAgentSession({
+                sessionFile: options.sessionManager?.getSessionFile(),
+                sessionId: options.sessionManager?.getSessionId(),
+              }),
+            };
+          },
+        }),
+      ],
+    });
+    const client = createClient(server);
+    client.connect();
+    await client.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+    await client.request('createSession', {
+      channel: sessionUri,
+      provider: 'pi-coding-agent',
+      workingDirectory: 'file:///workspaces/project-a',
+    });
+
+    assert.equal(
+      createdOptions?.sessionManager?.getSessionDir(),
+      join(storageRoot, 'session-ahp-session_3A_2Fpi-coding-storage-static'),
+    );
+    assert.equal(
+      createdOptions?.sessionManager?.getSessionFile()?.startsWith(`${createdOptions.sessionManager.getSessionDir()}/`),
+      true,
+    );
+
+    await client.request('disposeSession', { channel: sessionUri });
+    await client.shutdown();
+  } finally {
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test('Pi coding agent provider roots new sessions under resolver sessionStorage', async () => {
+  const storageDir = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-resolver-'));
+  const sessionUri = 'ahp-session:/pi-coding-storage-resolver';
+  let createdOptions: PiCodingAgentSessionFactoryOptions | undefined;
+  let receivedSessionUri: string | undefined;
+
+  try {
+    const server = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: context => {
+            receivedSessionUri = context.sessionUri;
+            return pathToFileURL(storageDir).href;
+          },
+          createAgentSession: async options => {
+            createdOptions = options;
+            return {
+              session: new FakePiCodingAgentSession({
+                sessionFile: options.sessionManager?.getSessionFile(),
+                sessionId: options.sessionManager?.getSessionId(),
+              }),
+            };
+          },
+        }),
+      ],
+    });
+    const client = createClient(server);
+    client.connect();
+    await client.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+    await client.request('createSession', {
+      channel: sessionUri,
+      provider: 'pi-coding-agent',
+      workingDirectory: 'file:///workspaces/project-a',
+    });
+
+    assert.equal(receivedSessionUri, sessionUri);
+    assert.equal(createdOptions?.sessionManager?.getSessionDir(), storageDir);
+
+    await client.request('disposeSession', { channel: sessionUri });
+    await client.shutdown();
+  } finally {
+    rmSync(storageDir, { recursive: true, force: true });
+  }
+});
+
+test('Pi coding agent provider prefers explicit sessionManager over sessionStorage', async () => {
+  const storageRoot = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-explicit-'));
+  const explicitManager = SessionManager.inMemory('/workspaces/explicit');
+  let createdOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  try {
+    const server = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: pathToFileURL(storageRoot).href,
+          createSessionOptions: () => ({ sessionManager: explicitManager }),
+          createAgentSession: async options => {
+            createdOptions = options;
+            return { session: new FakePiCodingAgentSession() };
+          },
+        }),
+      ],
+    });
+    const client = createClient(server);
+    client.connect();
+    await client.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+    await client.request('createSession', {
+      channel: 'ahp-session:/pi-coding-explicit-manager',
+      provider: 'pi-coding-agent',
+      workingDirectory: 'file:///workspaces/project-a',
+    });
+
+    assert.equal(createdOptions?.sessionManager, explicitManager);
+
+    await client.request('disposeSession', { channel: 'ahp-session:/pi-coding-explicit-manager' });
+    await client.shutdown();
+  } finally {
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test('Pi coding agent provider prefers provider sessionManager over sessionStorage', async () => {
+  const storageRoot = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-provider-explicit-'));
+  const explicitManager = SessionManager.inMemory('/workspaces/provider-explicit');
+  let createdOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  try {
+    const server = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: pathToFileURL(storageRoot).href,
+          sessionManager: explicitManager,
+          createAgentSession: async options => {
+            createdOptions = options;
+            return { session: new FakePiCodingAgentSession() };
+          },
+        }),
+      ],
+    });
+    const client = createClient(server);
+    client.connect();
+    await client.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+    await client.request('createSession', {
+      channel: 'ahp-session:/pi-coding-provider-explicit-manager',
+      provider: 'pi-coding-agent',
+      workingDirectory: 'file:///workspaces/project-a',
+    });
+
+    assert.equal(createdOptions?.sessionManager, explicitManager);
+
+    await client.request('disposeSession', { channel: 'ahp-session:/pi-coding-provider-explicit-manager' });
+    await client.shutdown();
+  } finally {
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test('Pi coding agent provider prefers per-session sessionManager over provider sessionManager', async () => {
+  const providerManager = SessionManager.inMemory('/workspaces/provider-explicit');
+  const perSessionManager = SessionManager.inMemory('/workspaces/per-session-explicit');
+  let createdOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  const server = new AhpServer({
+    providers: [
+      createPiCodingAgentProvider({
+        sessionManager: providerManager,
+        createSessionOptions: () => ({ sessionManager: perSessionManager }),
+        createAgentSession: async options => {
+          createdOptions = options;
+          return { session: new FakePiCodingAgentSession() };
+        },
+      }),
+    ],
+  });
+  const client = createClient(server);
+  client.connect();
+  await client.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+  await client.request('createSession', {
+    channel: 'ahp-session:/pi-coding-per-session-manager',
+    provider: 'pi-coding-agent',
+    workingDirectory: 'file:///workspaces/project-a',
+  });
+
+  assert.equal(createdOptions?.sessionManager, perSessionManager);
+
+  await client.request('disposeSession', { channel: 'ahp-session:/pi-coding-per-session-manager' });
+  await client.shutdown();
+});
+
+test('Pi coding agent provider resumes from the same sessionStorage directory', async () => {
+  const ahpStoreDir = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-resume-store-'));
+  const storageRoot = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-resume-root-'));
+  const sessionUri = 'ahp-session:/pi-coding-storage-resume';
+  let firstSessionFile: string | undefined;
+  let firstSessionId: string | undefined;
+  let resumedOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  try {
+    const firstServer = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: pathToFileURL(storageRoot).href,
+          createAgentSession: async options => {
+            firstSessionFile = options.sessionManager?.getSessionFile();
+            firstSessionId = options.sessionManager?.getSessionId();
+            return {
+              session: new FakePiCodingAgentSession({
+                sessionFile: firstSessionFile,
+                sessionId: firstSessionId,
+              }),
+            };
+          },
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory: ahpStoreDir }),
+    });
+    const firstClient = createClient(firstServer);
+    firstClient.connect();
+    await firstClient.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+    await firstClient.request('createSession', {
+      channel: sessionUri,
+      provider: 'pi-coding-agent',
+      workingDirectory: 'file:///workspaces/project-a',
+    });
+    await firstClient.shutdown();
+
+    assert.ok(firstSessionFile);
+    assert.ok(firstSessionId);
+    assert.equal(
+      firstSessionFile.startsWith(`${join(storageRoot, 'session-ahp-session_3A_2Fpi-coding-storage-resume')}/`),
+      true,
+    );
+    writeFileSync(firstSessionFile, `${JSON.stringify({
+      type: 'session',
+      version: 3,
+      id: firstSessionId,
+      timestamp: new Date().toISOString(),
+      cwd: '/workspaces/project-a',
+    })}\n`);
+
+    const secondServer = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: pathToFileURL(storageRoot).href,
+          createAgentSession: async options => {
+            resumedOptions = options;
+            return { session: new FakePiCodingAgentSession() };
+          },
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory: ahpStoreDir }),
+    });
+    const secondClient = createClient(secondServer);
+    secondClient.connect();
+
+    const reconnect = await secondClient.reconnect({
+      clientId: 'pi-coding-client',
+      lastSeenServerSeq: 0,
+      subscriptions: [sessionUri],
+    });
+
+    assert.equal(reconnect.type, 'snapshot');
+    assert.equal(resumedOptions?.sessionManager?.getSessionDir(), join(storageRoot, 'session-ahp-session_3A_2Fpi-coding-storage-resume'));
+    assert.equal(resumedOptions?.sessionManager?.getSessionFile(), firstSessionFile);
+    assert.equal(resumedOptions?.sessionManager?.getSessionId(), firstSessionId);
+
+    await secondClient.shutdown();
+  } finally {
+    rmSync(ahpStoreDir, { recursive: true, force: true });
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test('Pi coding agent provider keeps default session directory without sessionStorage', async () => {
+  const cwd = '/workspaces/project-a';
+  let createdOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  const server = new AhpServer({
+    providers: [
+      createPiCodingAgentProvider({
+        createAgentSession: async options => {
+          createdOptions = options;
+          return { session: new FakePiCodingAgentSession() };
+        },
+      }),
+    ],
+  });
+  const client = createClient(server);
+  client.connect();
+  await client.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+  await client.request('createSession', {
+    channel: 'ahp-session:/pi-coding-default-storage',
+    provider: 'pi-coding-agent',
+    workingDirectory: 'file:///workspaces/project-a',
+  });
+
+  assert.equal(
+    createdOptions?.sessionManager?.getSessionDir(),
+    SessionManager.create(cwd).getSessionDir(),
+  );
+  assert.equal(createdOptions?.sessionManager?.usesDefaultSessionDir(), true);
+
+  await client.request('disposeSession', { channel: 'ahp-session:/pi-coding-default-storage' });
+  await client.shutdown();
 });
 
 class FakePiCodingAgentSession implements PiCodingAgentSessionLike {
