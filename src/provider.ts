@@ -1,3 +1,5 @@
+import { isAbsolute, join, relative, sep } from 'node:path';
+
 import type {
   AgentInfo,
   Message,
@@ -93,6 +95,7 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
     const sessionOptions = await options.createSessionOptions?.(context) ?? {};
     const explicitSessionManager = sessionOptions.sessionManager ?? options.sessionManager;
     const sessionStorageDir = resolveSessionStorageDir(options.sessionStorage, context);
+    const sessionStorageDirPath = sessionStorageDir ? uriToPath(sessionStorageDir) : undefined;
     const createAgentSession = options.createAgentSession ?? defaultPiAgentSessionFactory;
     const created = await createAgentSession({
       ...stripProviderOptions(options),
@@ -102,7 +105,7 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
         cwd,
         resumeState,
         explicitSessionManager,
-        sessionStorageDir: sessionStorageDir ? uriToPath(sessionStorageDir) : undefined,
+        sessionStorageDir: sessionStorageDirPath,
       }),
       customTools: [
         ...(options.customTools ?? []),
@@ -115,6 +118,7 @@ export function createPiCodingAgentProvider(options: PiCodingAgentProviderOption
       activeClientTools,
       ahpToolNamesAtCreation,
       turnState,
+      sessionStorageDirPath,
     );
     session.setActiveClientTools(context.activeClientTools);
     return session;
@@ -150,6 +154,7 @@ class PiCodingAHPAgentSession implements AgentSession {
     private readonly activeClientTools: ActiveClientToolRouter,
     knownAhpToolNames: ReadonlySet<string>,
     private readonly turnState: PiCodingAgentTurnState,
+    private readonly sessionStorageDirPath?: string,
   ) {
     this.knownAhpToolNames = new Set(knownAhpToolNames);
   }
@@ -219,9 +224,24 @@ class PiCodingAHPAgentSession implements AgentSession {
       return undefined;
     }
     return {
-      ...(this.piSession.sessionFile ? { sessionFile: this.piSession.sessionFile } : {}),
+      ...(this.piSession.sessionFile ? { sessionFile: this.portableSessionFile(this.piSession.sessionFile) } : {}),
       ...(this.piSession.sessionId ? { sessionId: this.piSession.sessionId } : {}),
     };
+  }
+
+  // A session file under the storage dir is recorded relative to it, so the
+  // resume handle stays valid when the storage dir is hydrated to a different
+  // machine or path (the provider-kit sessionStorage contract). Files outside
+  // the storage dir keep their absolute path — today's behavior.
+  private portableSessionFile(sessionFile: string): string {
+    if (!this.sessionStorageDirPath) {
+      return sessionFile;
+    }
+    const relativePath = relative(this.sessionStorageDirPath, sessionFile);
+    if (relativePath.startsWith(`..${sep}`) || relativePath === '..' || isAbsolute(relativePath)) {
+      return sessionFile;
+    }
+    return relativePath;
   }
 
   async dispose(): Promise<void> {
@@ -318,7 +338,10 @@ function resolveSessionManager(options: {
   readonly sessionStorageDir?: string;
 }): CreateAgentSessionOptions['sessionManager'] {
   if (options.resumeState.sessionFile) {
-    return SessionManager.open(options.resumeState.sessionFile, options.sessionStorageDir, options.cwd);
+    const sessionFile = !isAbsolute(options.resumeState.sessionFile) && options.sessionStorageDir
+      ? join(options.sessionStorageDir, options.resumeState.sessionFile)
+      : options.resumeState.sessionFile;
+    return SessionManager.open(sessionFile, options.sessionStorageDir, options.cwd);
   }
   if (options.resumeState.sessionId) {
     return SessionManager.create(options.cwd, options.sessionStorageDir, { id: options.resumeState.sessionId });

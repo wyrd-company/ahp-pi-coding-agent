@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 
@@ -552,6 +552,96 @@ test('Pi coding agent provider resumes from the same sessionStorage directory', 
   } finally {
     rmSync(ahpStoreDir, { recursive: true, force: true });
     rmSync(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test('Pi coding agent provider resumes after the storage directory moves to a new path', async () => {
+  const ahpStoreDir = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-move-store-'));
+  const firstRoot = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-move-a-'));
+  const secondRoot = mkdtempSync(join(tmpdir(), 'ahp-pi-coding-storage-move-b-'));
+  const sessionUri = 'ahp-session:/pi-coding-storage-move';
+  const sessionSegment = 'session-ahp-session_3A_2Fpi-coding-storage-move';
+  let firstSessionFile: string | undefined;
+  let firstSessionId: string | undefined;
+  let resumedOptions: PiCodingAgentSessionFactoryOptions | undefined;
+
+  try {
+    const firstServer = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: pathToFileURL(firstRoot).href,
+          createAgentSession: async options => {
+            firstSessionFile = options.sessionManager?.getSessionFile();
+            firstSessionId = options.sessionManager?.getSessionId();
+            return {
+              session: new FakePiCodingAgentSession({
+                sessionFile: firstSessionFile,
+                sessionId: firstSessionId,
+              }),
+            };
+          },
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory: ahpStoreDir }),
+    });
+    const firstClient = createClient(firstServer);
+    firstClient.connect();
+    await firstClient.initialize({ clientId: 'pi-coding-client', protocolVersions: ['0.3.0'] });
+    await firstClient.request('createSession', {
+      channel: sessionUri,
+      provider: 'pi-coding-agent',
+      workingDirectory: 'file:///workspaces/project-a',
+    });
+    await firstClient.shutdown();
+
+    assert.ok(firstSessionFile);
+    assert.ok(firstSessionId);
+    writeFileSync(firstSessionFile, `${JSON.stringify({
+      type: 'session',
+      version: 3,
+      id: firstSessionId,
+      timestamp: new Date().toISOString(),
+      cwd: '/workspaces/project-a',
+    })}\n`);
+
+    // Simulate hydration on another machine: content moves, old root disappears.
+    cpSync(join(firstRoot, sessionSegment), join(secondRoot, sessionSegment), { recursive: true });
+    rmSync(firstRoot, { recursive: true, force: true });
+
+    const secondServer = new AhpServer({
+      providers: [
+        createPiCodingAgentProvider({
+          sessionStorage: pathToFileURL(secondRoot).href,
+          createAgentSession: async options => {
+            resumedOptions = options;
+            return { session: new FakePiCodingAgentSession() };
+          },
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory: ahpStoreDir }),
+    });
+    const secondClient = createClient(secondServer);
+    secondClient.connect();
+
+    const reconnect = await secondClient.reconnect({
+      clientId: 'pi-coding-client',
+      lastSeenServerSeq: 0,
+      subscriptions: [sessionUri],
+    });
+
+    assert.equal(reconnect.type, 'snapshot');
+    assert.ok(firstSessionFile);
+    assert.equal(
+      resumedOptions?.sessionManager?.getSessionFile(),
+      join(secondRoot, sessionSegment, basename(firstSessionFile)),
+    );
+    assert.equal(resumedOptions?.sessionManager?.getSessionId(), firstSessionId);
+
+    await secondClient.shutdown();
+  } finally {
+    rmSync(ahpStoreDir, { recursive: true, force: true });
+    rmSync(firstRoot, { recursive: true, force: true });
+    rmSync(secondRoot, { recursive: true, force: true });
   }
 });
 
